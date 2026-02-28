@@ -4,6 +4,7 @@
 import logging
 import random
 from argparse import ArgumentParser, ArgumentTypeError
+from typing import Any, Optional
 
 from rich import print
 from rich.align import Align
@@ -37,31 +38,52 @@ logger = logging.getLogger(__name__)
 
 
 class Retriever:
-    PPPOE_CODES = {
-        9: "PADI",
-        7: "PADO",
-        25: "PADR",
-        101: "PADS",
-        167: "PADT",
-    }
+    # PPPoE Discovery Codes (RFC 2516)
+    CODE_PADI = 9
+    CODE_PADO = 7
+    CODE_PADR = 25
+    CODE_PADS = 101
+    CODE_PADT = 167
 
-    def __init__(self, interface, vlan, search_range, verbose=False, timeout=None):
+    # PPPoE Tag Types (RFC 2516)
+    TAG_SERVICE_NAME = 257
+    TAG_AC_NAME = 258
+    TAG_HOST_UNIQ = 259
+    TAG_AC_COOKIE = 260
+
+    @classmethod
+    def _code_name(cls, code: int) -> str:
+        """Get human-readable name for PPPoE discovery code."""
+        names = {
+            cls.CODE_PADI: "PADI",
+            cls.CODE_PADO: "PADO",
+            cls.CODE_PADR: "PADR",
+            cls.CODE_PADS: "PADS",
+            cls.CODE_PADT: "PADT",
+        }
+        return names.get(code, f"Unknown({code})")
+
+    def __init__(
+        self,
+        interface: str,
+        vlan: Optional[int],
+        search_range: int,
+        verbose: bool = False,
+        timeout: Optional[int] = None,
+    ) -> None:
         self.interface = interface
         self.vlan = vlan
-        self.username = None
-        self.password = None
-        self.generated_host_unique = None
+        self.username: Optional[str] = None
+        self.password: Optional[str] = None
+        self.generated_host_unique: Optional[bytes] = None
         self.verbose = verbose
-        self.vlan_dict = {
-            i: i.to_bytes(16, "big") for i in range(search_range)
-        }  # Range of possible VLAN_ID's (4096, 12 bits).
+        self.vlan_dict = {i: i.to_bytes(16, "big") for i in range(search_range)}
 
         if self.verbose:
             logger.info(f"Starting capture on interface: {interface}")
             logger.info(f"VLAN: {vlan if vlan else 'auto-discover'}")
             logger.info(f"Search range: {search_range}")
 
-        # Replace 'lo' with the appropriate loopback interface on your system
         sniff(
             prn=self.handle_eth_frame,
             iface=self.interface,
@@ -71,22 +93,23 @@ class Retriever:
             timeout=timeout,
         )
 
-    def handle_eth_frame(self, packet):
+    def handle_eth_frame(self, packet: Any) -> None:
+        """Handle incoming Ethernet frames and process PPPoE packets."""
         if PPPoED in packet:
             code = packet[PPPoED].code
-            code_name = self.PPPOE_CODES.get(code, f"Unknown({code})")
+            code_name = self._code_name(code)
 
             if self.verbose:
                 vlan = packet[Dot1Q].vlan if Dot1Q in packet else "none"
                 logger.info(f"Received PPPoE packet: {code_name} (VLAN: {vlan})")
 
             # If PADI packet reply with PADO
-            if code == 9:
+            if code == self.CODE_PADI:
                 if self.verbose:
                     logger.info("Sending PADO response(s)...")
                 if self.vlan:
                     self.send_pado_packet(
-                        packet, self.interface, self.vlan, RandString(16)
+                        packet, self.interface, self.vlan, bytes(RandString(16))
                     )
                 else:
                     for vlan_id, ac_cookie in self.vlan_dict.items():
@@ -95,13 +118,12 @@ class Retriever:
                         )
 
             # If PADR packet reply with PADS
-            if code == 25:
+            if code == self.CODE_PADR:
                 if self.verbose:
                     logger.info("Received PADR, sending PADS...")
-                # Retrieve the VLAN ID
                 response_ac_cookie = ""
                 for tag in packet[PPPoED_Tags].tag_list:
-                    if tag.tag_type == 260:  # AC_Cookie Tag
+                    if tag.tag_type == self.TAG_AC_COOKIE:
                         response_ac_cookie = tag.tag_value
                 for vlan_id, ac_cookie in self.vlan_dict.items():
                     if bytes(ac_cookie) == response_ac_cookie:
@@ -122,7 +144,7 @@ class Retriever:
             if PPP_LCP_Configure in packet and packet[PPP_LCP_Configure].code == 1:
                 if self.verbose:
                     logger.info("Received LCP Configure-Request, sending response...")
-                self.stablish_ppp_lcp_config(packet, self.interface, self.vlan)
+                self.establish_ppp_lcp_config(packet, self.interface, self.vlan)
 
             # If PPP_PAP_Request store credentials
             elif PPP_PAP_Request in packet:
@@ -133,16 +155,17 @@ class Retriever:
                     logger.info(f"Username: {self.username}")
                     logger.info("Password: [REDACTED]")
 
-    def send_pado_packet(self, pagi_packet, interface, vlan, ac_cookie):
-        # Extract the mac address of the interface
+    def send_pado_packet(
+        self, pagi_packet: Any, interface: str, vlan: int, ac_cookie: bytes
+    ) -> None:
+        """Send PPPoE PADO (Active Discovery Offer) packet in response to PADI."""
         src_mac = get_if_hwaddr(interface)
 
-        # Get Host-Uniq tag value (generate random if not present, reuse if already generated)
         if self.generated_host_unique is None:
-            host_unique = RandString(16)
+            host_unique: bytes = bytes(RandString(16))
             if PPPoED_Tags in pagi_packet:
                 for tag in pagi_packet[PPPoED_Tags].tag_list:
-                    if tag.tag_type == 259:  # Host-Uniq Tag
+                    if tag.tag_type == self.TAG_HOST_UNIQ:
                         host_unique = tag.tag_value
                         break
                 else:
@@ -153,30 +176,30 @@ class Retriever:
         else:
             host_unique = self.generated_host_unique
 
-        # Create of PADO packet
         pado_packet = (
             Ether(src=src_mac, dst=pagi_packet[Ether].src)
             / Dot1Q(prio=0, vlan=vlan)
-            / PPPoED(code=7)
+            / PPPoED(code=self.CODE_PADO)
             / PPPoED_Tags(
                 tag_list=[
-                    PPPoETag(tag_type=257, tag_value=""),
-                    PPPoETag(tag_type=258, tag_value="MyAccessConcentrator"),
-                    PPPoETag(tag_type=260, tag_value=ac_cookie),
-                    PPPoETag(tag_type=259, tag_value=host_unique),
+                    PPPoETag(tag_type=self.TAG_SERVICE_NAME, tag_value=""),
+                    PPPoETag(
+                        tag_type=self.TAG_AC_NAME, tag_value="MyAccessConcentrator"
+                    ),
+                    PPPoETag(tag_type=self.TAG_AC_COOKIE, tag_value=ac_cookie),
+                    PPPoETag(tag_type=self.TAG_HOST_UNIQ, tag_value=host_unique),
                 ]
             )
         )
 
-        # Send PADO packet
         sendp(pado_packet, iface=interface, verbose=False)
 
-    def send_pads_packet(self, padr_packet, interface, vlan):
-        # Get Host-Uniq and AC-Cookie tag values (reuse generated if available)
+    def send_pads_packet(self, padr_packet: Any, interface: str, vlan: int) -> None:
+        """Send PPPoE PADS (Active Discovery Session-confirmation) packet in response to PADR."""
         if self.generated_host_unique is not None:
             host_unique = self.generated_host_unique
         else:
-            host_unique = RandString(16)
+            host_unique = bytes(RandString(16))
             logger.warning(
                 "Host-Uniq tag not found in PADR packet, using generated value"
             )
@@ -185,7 +208,7 @@ class Retriever:
         if PPPoED_Tags in padr_packet:
             has_ac_cookie = False
             for tag in padr_packet[PPPoED_Tags].tag_list:
-                if tag.tag_type == 260:  # AC-Cookie Tag
+                if tag.tag_type == self.TAG_AC_COOKIE:
                     ac_cookie = tag.tag_value
                     has_ac_cookie = True
             if not has_ac_cookie:
@@ -193,16 +216,15 @@ class Retriever:
                     "AC-Cookie tag not found in PADR packet, using empty value"
                 )
 
-        # Create PADS packet
         packet = (
             Ether(src=padr_packet[Ether].dst, dst=padr_packet[Ether].src)
             / Dot1Q(prio=0, vlan=vlan)
-            / PPPoED(code=101, sessionid=random.randint(1, 0xFFFF))
+            / PPPoED(code=self.CODE_PADS, sessionid=random.randint(1, 0xFFFF))
             / PPPoED_Tags(
                 tag_list=[
-                    PPPoETag(tag_type=257, tag_value=""),
-                    PPPoETag(tag_type=260, tag_value=ac_cookie),
-                    PPPoETag(tag_type=259, tag_value=host_unique),
+                    PPPoETag(tag_type=self.TAG_SERVICE_NAME, tag_value=""),
+                    PPPoETag(tag_type=self.TAG_AC_COOKIE, tag_value=ac_cookie),
+                    PPPoETag(tag_type=self.TAG_HOST_UNIQ, tag_value=host_unique),
                 ]
             )
         )
@@ -210,15 +232,14 @@ class Retriever:
         # Send PADS packet
         sendp(packet, iface=interface, verbose=False)
 
-    def stablish_ppp_lcp_config(self, pads_packet, interface, vlan):
-        # Ether / Dot1Q / PPPoE / PPP / LCP Configure-Request / Padding
-
+    def establish_ppp_lcp_config(
+        self, pads_packet: Any, interface: str, vlan: int
+    ) -> None:
+        """Establish PPP LCP configuration by responding to LCP Configure-Request."""
         config_ack_packet = (
             Ether(src=pads_packet[Ether].dst, dst=pads_packet[Ether].src)
             / Dot1Q(prio=0, vlan=vlan)
-            /
-            # Generate a random integer between 1 and 65535
-            PPPoE(sessionid=pads_packet[PPPoE].sessionid)
+            / PPPoE(sessionid=pads_packet[PPPoE].sessionid)
             / PPP()
             / PPP_LCP_Configure(
                 code=2,
@@ -228,7 +249,6 @@ class Retriever:
             / Padding(load=b"\x00" * 20)
         )
 
-        # Send PPP_LCP config acknowledgment packet
         sendp(config_ack_packet, iface=interface, verbose=False)
 
         config_packet = (
@@ -238,13 +258,9 @@ class Retriever:
                 if Dot1Q in pads_packet
                 else Dot1Q(prio=0, vlan=24)
             )
-            /
-            # Generate a random integer between 1 and 65535
-            PPPoE(sessionid=pads_packet[PPPoE].sessionid)
+            / PPPoE(sessionid=pads_packet[PPPoE].sessionid)
             / PPP()
-            /
-            # id requires 0 <= number <= 255
-            PPP_LCP_Configure(
+            / PPP_LCP_Configure(
                 code=1,
                 id=35,
                 options=[
@@ -258,7 +274,8 @@ class Retriever:
         sendp(config_packet, iface=interface, verbose=False)
 
 
-def main():
+def main() -> None:
+    """Main entry point for the PPPoE credential retriever."""
     parser = ArgumentParser(
         description="Retrieves the PPPoE credentials from ISP-locked down routers."
     )
