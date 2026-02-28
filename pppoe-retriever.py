@@ -37,15 +37,29 @@ logger = logging.getLogger(__name__)
 
 
 class Retriever:
-    def __init__(self, interface, vlan, search_range):
+    PPPOE_CODES = {
+        9: "PADI",
+        7: "PADO",
+        25: "PADR",
+        101: "PADS",
+        167: "PADT",
+    }
+
+    def __init__(self, interface, vlan, search_range, verbose=False, timeout=None):
         self.interface = interface
         self.vlan = vlan
         self.username = None
         self.password = None
-        self.generated_host_unique = None  # Store generated Host-Uniq for consistency
+        self.generated_host_unique = None
+        self.verbose = verbose
         self.vlan_dict = {
             i: i.to_bytes(16, "big") for i in range(search_range)
         }  # Range of possible VLAN_ID's (4096, 12 bits).
+
+        if self.verbose:
+            logger.info(f"Starting capture on interface: {interface}")
+            logger.info(f"VLAN: {vlan if vlan else 'auto-discover'}")
+            logger.info(f"Search range: {search_range}")
 
         # Replace 'lo' with the appropriate loopback interface on your system
         sniff(
@@ -54,12 +68,22 @@ class Retriever:
             lfilter=lambda pkg: pkg.haslayer(PPP) or pkg.haslayer(PPPoED),
             stop_filter=lambda pkg: pkg.haslayer(PPP_PAP_Request),
             store=0,
+            timeout=timeout,
         )
 
     def handle_eth_frame(self, packet):
         if PPPoED in packet:
+            code = packet[PPPoED].code
+            code_name = self.PPPOE_CODES.get(code, f"Unknown({code})")
+
+            if self.verbose:
+                vlan = packet[Dot1Q].vlan if Dot1Q in packet else "none"
+                logger.info(f"Received PPPoE packet: {code_name} (VLAN: {vlan})")
+
             # If PADI packet reply with PADO
-            if packet[PPPoED].code == 9:
+            if code == 9:
+                if self.verbose:
+                    logger.info("Sending PADO response(s)...")
                 if self.vlan:
                     self.send_pado_packet(
                         packet, self.interface, self.vlan, RandString(16)
@@ -71,7 +95,9 @@ class Retriever:
                         )
 
             # If PADR packet reply with PADS
-            if packet[PPPoED].code == 25:
+            if code == 25:
+                if self.verbose:
+                    logger.info("Received PADR, sending PADS...")
                 # Retrieve the VLAN ID
                 response_ac_cookie = ""
                 for tag in packet[PPPoED_Tags].tag_list:
@@ -81,17 +107,31 @@ class Retriever:
                     if bytes(ac_cookie) == response_ac_cookie:
                         self.vlan = vlan_id
 
+                if self.verbose:
+                    logger.info(f"Matched VLAN: {self.vlan}")
                 self.send_pads_packet(packet, self.interface, self.vlan)
 
         elif PPPoE in packet:
+            session_id = packet[PPPoE].sessionid
+            if self.verbose:
+                logger.info(
+                    f"Received PPP session packet: session_id=0x{session_id:04x}"
+                )
+
             # If PADS then configure PPP_LCP
             if PPP_LCP_Configure in packet and packet[PPP_LCP_Configure].code == 1:
+                if self.verbose:
+                    logger.info("Received LCP Configure-Request, sending response...")
                 self.stablish_ppp_lcp_config(packet, self.interface, self.vlan)
 
             # If PPP_PAP_Request store credentials
             elif PPP_PAP_Request in packet:
                 self.username = packet[PPP_PAP_Request].username.decode()
                 self.password = packet[PPP_PAP_Request].password.decode()
+                if self.verbose:
+                    logger.info("Credentials captured!")
+                    logger.info(f"Username: {self.username}")
+                    logger.info("Password: [REDACTED]")
 
     def send_pado_packet(self, pagi_packet, interface, vlan, ac_cookie):
         # Extract the mac address of the interface
@@ -237,7 +277,20 @@ def main():
         help="range of VLAN ID's to try with (must be between 1 and 4096), this will be ignored if --vlan argument is provided",
     )
     parser.add_argument(
-        "-v", "--version", action="version", version="%(prog)s 1.1.0", help="version"
+        "-t",
+        "--timeout",
+        type=int,
+        default=None,
+        help="timeout in seconds for capturing (default: unlimited)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="enable verbose logging of all PPPoE packets",
+    )
+    parser.add_argument(
+        "--version", action="version", version="%(prog)s 1.1.0", help="show version"
     )
 
     args = parser.parse_args()
@@ -251,11 +304,30 @@ def main():
     console = Console()
     rtrv = None
 
-    with console.status(
-        f"Monitoring interface {args.interface} for PPPoE connection to be stablish",
-        spinner="dots",
-    ):
-        rtrv = Retriever(args.interface, args.vlan, args.range)
+    status_message = f"Monitoring interface {args.interface} for PPPoE connection"
+    if args.timeout:
+        status_message += f" (timeout: {args.timeout}s)"
+    if args.v:
+        logger.info("Verbose mode enabled")
+
+    with console.status(status_message, spinner="dots"):
+        rtrv = Retriever(
+            args.interface,
+            args.vlan,
+            args.range,
+            verbose=args.v,
+            timeout=args.timeout,
+        )
+
+    if rtrv.username is None or rtrv.password is None:
+        error_msg = "Failed to capture PPPoE credentials"
+        if args.timeout:
+            error_msg += f" (timeout after {args.timeout}s)"
+        error_msg += "\n\nTry running with --verbose to see what's happening."
+        if not args.vlan:
+            error_msg += "\nYou can also try specifying a VLAN with -l <vlan_id>"
+        console.print(f"[bold red]Error:[/bold red] {error_msg}")
+        return
 
     result_message = f"Username: {rtrv.username}\nPassword: {rtrv.password}"
 
