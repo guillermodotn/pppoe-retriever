@@ -30,6 +30,8 @@ from scapy.all import (
     sniff,
 )
 
+__version__ = "1.1.0"
+
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
@@ -307,7 +309,10 @@ def main() -> None:
         help="enable verbose logging of all PPPoE packets",
     )
     parser.add_argument(
-        "--version", action="version", version="%(prog)s 1.1.0", help="show version"
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="show version",
     )
 
     args = parser.parse_args()
@@ -324,7 +329,7 @@ def main() -> None:
     status_message = f"Monitoring interface {args.interface} for PPPoE connection"
     if args.timeout:
         status_message += f" (timeout: {args.timeout}s)"
-    if args.v:
+    if args.verbose:
         logger.info("Verbose mode enabled")
 
     with console.status(status_message, spinner="dots"):
@@ -332,7 +337,7 @@ def main() -> None:
             args.interface,
             args.vlan,
             args.range,
-            verbose=args.v,
+            verbose=args.verbose,
             timeout=args.timeout,
         )
 
