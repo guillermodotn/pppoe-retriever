@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 
+import logging
 import random
 from argparse import ArgumentParser, ArgumentTypeError
 
@@ -28,6 +29,12 @@ from scapy.all import (
     sniff,
 )
 
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
 
 class Retriever:
     def __init__(self, interface, vlan, search_range):
@@ -35,6 +42,7 @@ class Retriever:
         self.vlan = vlan
         self.username = None
         self.password = None
+        self.generated_host_unique = None  # Store generated Host-Uniq for consistency
         self.vlan_dict = {
             i: i.to_bytes(16, "big") for i in range(search_range)
         }  # Range of possible VLAN_ID's (4096, 12 bits).
@@ -85,20 +93,29 @@ class Retriever:
                 self.username = packet[PPP_PAP_Request].username.decode()
                 self.password = packet[PPP_PAP_Request].password.decode()
 
-    @staticmethod
-    def send_pado_packet(padi_packet, interface, vlan, ac_cookie):
+    def send_pado_packet(self, pagi_packet, interface, vlan, ac_cookie):
         # Extract the mac address of the interface
         src_mac = get_if_hwaddr(interface)
 
-        # Get Host-Unig tag value
-        if PPPoED_Tags in padi_packet:
-            for tag in padi_packet[PPPoED_Tags].tag_list:
-                if tag.tag_type == 259:  # Host-Uniq Tag
-                    host_unique = tag.tag_value
+        # Get Host-Uniq tag value (generate random if not present, reuse if already generated)
+        if self.generated_host_unique is None:
+            host_unique = RandString(16)
+            if PPPoED_Tags in pagi_packet:
+                for tag in pagi_packet[PPPoED_Tags].tag_list:
+                    if tag.tag_type == 259:  # Host-Uniq Tag
+                        host_unique = tag.tag_value
+                        break
+                else:
+                    logger.warning(
+                        "Host-Uniq tag not found in PADI packet, using generated value"
+                    )
+            self.generated_host_unique = host_unique
+        else:
+            host_unique = self.generated_host_unique
 
         # Create of PADO packet
         pado_packet = (
-            Ether(src=src_mac, dst=padi_packet[Ether].src)
+            Ether(src=src_mac, dst=pagi_packet[Ether].src)
             / Dot1Q(prio=0, vlan=vlan)
             / PPPoED(code=7)
             / PPPoED_Tags(
@@ -109,29 +126,38 @@ class Retriever:
                     PPPoETag(tag_type=259, tag_value=host_unique),
                 ]
             )
-            # Padding(load=b'\x00' * 2)
         )
 
         # Send PADO packet
         sendp(pado_packet, iface=interface, verbose=False)
 
-    @staticmethod
-    def send_pads_packet(padr_packet, interface, vlan):
-        # Get Host-Unig and AC-Cookie tag values
-        if PPPoED_Tags in padr_packet:
-            for tag in padr_packet[PPPoED_Tags].tag_list:
-                if tag.tag_type == 259:  # Host-Uniq Tag
-                    host_unique = tag.tag_value
-                elif tag.tag_type == 260:  # AC-Cookie Tag
-                    ac_cookie = tag.tag_value
+    def send_pads_packet(self, padr_packet, interface, vlan):
+        # Get Host-Uniq and AC-Cookie tag values (reuse generated if available)
+        if self.generated_host_unique is not None:
+            host_unique = self.generated_host_unique
+        else:
+            host_unique = RandString(16)
+            logger.warning(
+                "Host-Uniq tag not found in PADR packet, using generated value"
+            )
 
-        # Create of PADO packet
+        ac_cookie = b""
+        if PPPoED_Tags in padr_packet:
+            has_ac_cookie = False
+            for tag in padr_packet[PPPoED_Tags].tag_list:
+                if tag.tag_type == 260:  # AC-Cookie Tag
+                    ac_cookie = tag.tag_value
+                    has_ac_cookie = True
+            if not has_ac_cookie:
+                logger.warning(
+                    "AC-Cookie tag not found in PADR packet, using empty value"
+                )
+
+        # Create PADS packet
         packet = (
             Ether(src=padr_packet[Ether].dst, dst=padr_packet[Ether].src)
             / Dot1Q(prio=0, vlan=vlan)
-            /
-            # Generate a random integer between 1 and 65535
-            PPPoED(code=101, sessionid=random.randint(1, 0xFFFF))
+            / PPPoED(code=101, sessionid=random.randint(1, 0xFFFF))
             / PPPoED_Tags(
                 tag_list=[
                     PPPoETag(tag_type=257, tag_value=""),
@@ -141,11 +167,10 @@ class Retriever:
             )
         )
 
-        # Send PADR packet
+        # Send PADS packet
         sendp(packet, iface=interface, verbose=False)
 
-    @staticmethod
-    def stablish_ppp_lcp_config(pads_packet, interface, vlan):
+    def stablish_ppp_lcp_config(self, pads_packet, interface, vlan):
         # Ether / Dot1Q / PPPoE / PPP / LCP Configure-Request / Padding
 
         config_ack_packet = (
