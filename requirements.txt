@@ -1,5 +1,5 @@
 markdown-it-py==4.0.0
 mdurl==0.1.2
-pygments==2.19.2
+pygments==2.20.0
 rich==14.3.3
 scapy==2.7.0
