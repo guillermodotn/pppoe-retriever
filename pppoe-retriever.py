@@ -178,9 +178,11 @@ class Retriever:
         else:
             host_unique = self.generated_host_unique
 
+        l2 = Ether(src=src_mac, dst=pagi_packet[Ether].src)
+        if vlan:
+            l2 = l2 / Dot1Q(prio=0, vlan=vlan)
         pado_packet = (
-            Ether(src=src_mac, dst=pagi_packet[Ether].src)
-            / Dot1Q(prio=0, vlan=vlan)
+            l2
             / PPPoED(code=self.CODE_PADO)
             / PPPoED_Tags(
                 tag_list=[
@@ -218,9 +220,11 @@ class Retriever:
                     "AC-Cookie tag not found in PADR packet, using empty value"
                 )
 
+        l2 = Ether(src=padr_packet[Ether].dst, dst=padr_packet[Ether].src)
+        if vlan:
+            l2 = l2 / Dot1Q(prio=0, vlan=vlan)
         packet = (
-            Ether(src=padr_packet[Ether].dst, dst=padr_packet[Ether].src)
-            / Dot1Q(prio=0, vlan=vlan)
+            l2
             / PPPoED(code=self.CODE_PADS, sessionid=random.randint(1, 0xFFFF))
             / PPPoED_Tags(
                 tag_list=[
