@@ -35,7 +35,8 @@ For more information about how to use this script refer to: [PPPoE Credential Re
 If you have tested this tool on a device that is not listed below, please consider submitting an update with your new entry or creating an issue with the details of the device.
 
 
-| Model               | ISP            | Firmware Version |
-|---------------------|----------------|------------------|
-| lowi-h500s          | lowi           | 1.0.0            |
+| Model                   | ISP                    | Firmware Version |
+|-------------------------|------------------------|------------------|
+| lowi-h500s              | lowi                   | 1.0.0            |
+| TP-Link Archer AX53 V2  | Brazilian regional ISP | unknown          |
 
