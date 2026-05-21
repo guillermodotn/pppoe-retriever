@@ -242,9 +242,14 @@ class Retriever:
         self, pads_packet: Any, interface: str, vlan: int
     ) -> None:
         """Establish PPP LCP configuration by responding to LCP Configure-Request."""
+        base_l2 = Ether(src=pads_packet[Ether].dst, dst=pads_packet[Ether].src)
+        if vlan:
+            l2 = base_l2 / Dot1Q(prio=0, vlan=vlan)
+        else:
+            l2 = base_l2
+
         config_ack_packet = (
-            Ether(src=pads_packet[Ether].dst, dst=pads_packet[Ether].src)
-            / Dot1Q(prio=0, vlan=vlan)
+            l2
             / PPPoE(sessionid=pads_packet[PPPoE].sessionid)
             / PPP()
             / PPP_LCP_Configure(
@@ -258,12 +263,7 @@ class Retriever:
         sendp(config_ack_packet, iface=interface, verbose=False)
 
         config_packet = (
-            Ether(src=pads_packet[Ether].dst, dst=pads_packet[Ether].src)
-            / (
-                Dot1Q(prio=0, vlan=pads_packet[Dot1Q].vlan)
-                if Dot1Q in pads_packet
-                else Dot1Q(prio=0, vlan=24)
-            )
+            l2
             / PPPoE(sessionid=pads_packet[PPPoE].sessionid)
             / PPP()
             / PPP_LCP_Configure(
