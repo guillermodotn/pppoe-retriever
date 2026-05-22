@@ -30,7 +30,7 @@ from scapy.all import (
     sniff,
 )
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
