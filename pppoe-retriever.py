@@ -77,6 +77,7 @@ class Retriever:
         self.vlan = vlan
         self.username: Optional[str] = None
         self.password: Optional[str] = None
+        self.client_mac: Optional[str] = None
         self.generated_host_unique: Optional[bytes] = None
         self.verbose = verbose
         self.vlan_dict = {i: i.to_bytes(16, "big") for i in range(search_range)}
@@ -152,10 +153,12 @@ class Retriever:
             elif PPP_PAP_Request in packet:
                 self.username = packet[PPP_PAP_Request].username.decode()
                 self.password = packet[PPP_PAP_Request].password.decode()
+                self.client_mac = packet.src
                 if self.verbose:
                     logger.info("Credentials captured!")
                     logger.info(f"Username: {self.username}")
                     logger.info("Password: [REDACTED]")
+                    logger.info(f"Client MAC: {self.client_mac}")
 
     def send_pado_packet(
         self, pagi_packet: Any, interface: str, vlan: int, ac_cookie: bytes
@@ -355,7 +358,7 @@ def main() -> None:
         console.print(f"[bold red]Error:[/bold red] {error_msg}")
         return
 
-    result_message = f"Username: {rtrv.username}\nPassword: {rtrv.password}"
+    result_message = f"Username: {rtrv.username}\nPassword: {rtrv.password}\nClient MAC: {rtrv.client_mac}"
 
     if not args.vlan:
         result_message += f"\n\n\nYou may need the VLAN configuration to complete the setup of your new router.\n\nVLAN: {rtrv.vlan}"
